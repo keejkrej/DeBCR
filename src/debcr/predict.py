@@ -21,12 +21,22 @@ def _device(name: str) -> torch.device:
 
 def _load_checkpoint(path: str | Path, device: torch.device) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
     checkpoint = torch.load(path, map_location=device)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        config = dict(checkpoint.get("model_config") or {})
-        return checkpoint["model_state_dict"], config
-    if isinstance(checkpoint, dict):
-        return checkpoint, {}
-    raise ValueError(f"Unsupported checkpoint format: {path}")
+    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
+        raise ValueError(f"Expected a Lightning checkpoint from debcr-train: {path}")
+
+    hyper_parameters = checkpoint.get("hyper_parameters") or {}
+    config = dict(hyper_parameters.get("model_config") or {})
+    if not config:
+        raise ValueError(f"Checkpoint is missing model_config hyperparameters: {path}")
+
+    state_dict = {
+        key.removeprefix("model."): value
+        for key, value in checkpoint["state_dict"].items()
+        if key.startswith("model.")
+    }
+    if not state_dict:
+        raise ValueError(f"Checkpoint has no DeBCR model weights: {path}")
+    return state_dict, config
 
 
 def _to_output_array(pred: torch.Tensor) -> np.ndarray:
@@ -61,14 +71,10 @@ def predict_file(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run PyTorch DeBCR prediction on NPZ low arrays.")
     parser.add_argument("--input", required=True, help="Single NPZ file or directory of NPZ files.")
-    parser.add_argument("--checkpoint", required=True, help="PyTorch checkpoint from debcr-train.")
+    parser.add_argument("--checkpoint", required=True, help="Lightning checkpoint from debcr-train.")
     parser.add_argument("--output-dir", default="results", help="Directory for results*.npz files.")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--device", default="auto", help="'auto', 'cpu', 'cuda', or a torch device string.")
-    parser.add_argument("--width", type=int, default=32, help="Used when checkpoint has no model_config.")
-    parser.add_argument("--blocks", type=int, default=4, help="Used when checkpoint has no model_config.")
-    parser.add_argument("--growth", type=int, default=16, help="Used when checkpoint has no model_config.")
-    parser.add_argument("--dense-layers", type=int, default=3, help="Used when checkpoint has no model_config.")
     parser.add_argument("--no-rescale", action="store_true", help="Disable per-sample [0, 1] rescaling.")
     return parser
 
@@ -81,12 +87,10 @@ def main(argv: list[str] | None = None) -> None:
 
     state_dict, config = _load_checkpoint(args.checkpoint, device)
     first_low = load_npz_low(files[0], rescale=not args.no_rescale)
-    config.setdefault("in_channels", int(first_low.shape[1]))
-    config.setdefault("out_channels", int(first_low.shape[1]))
-    config.setdefault("width", args.width)
-    config.setdefault("blocks", args.blocks)
-    config.setdefault("growth", args.growth)
-    config.setdefault("dense_layers", args.dense_layers)
+    if int(first_low.shape[1]) != int(config["in_channels"]):
+        raise ValueError(
+            f"Input has {first_low.shape[1]} channel(s), but checkpoint expects {config['in_channels']}."
+        )
 
     model = DeBCR(**config).to(device)
     model.load_state_dict(state_dict)
@@ -108,4 +112,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

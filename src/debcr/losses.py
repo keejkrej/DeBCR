@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 
 def mse_fft_loss(target: Tensor, pred: Tensor, fft_weight: float = 0.5) -> Tensor:
-    """MSE plus an L1 frequency-domain term, matching the legacy DeBCR loss."""
+    """MSE plus an L1 frequency-domain term, matching the original DeBCR loss."""
 
     mse = F.mse_loss(pred, target)
     target_fft = torch.fft.rfft2(target, dim=(-2, -1))
@@ -40,4 +40,3 @@ class MIMOMSEFFTLoss(nn.Module):
 
     def forward(self, preds: Sequence[Tensor], targets: Sequence[Tensor]) -> Tensor:
         return mimo_mse_fft_loss(targets, preds, fft_weight=self.fft_weight)
-

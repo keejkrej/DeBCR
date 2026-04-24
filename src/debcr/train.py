@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from typing import Any
 
 import lightning.pytorch as L
 import torch
 from torch.utils.data import DataLoader
-from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from .data import NPZImageDataset, make_mimo_scales
 from .losses import MIMOMSEFFTLoss
@@ -35,20 +34,6 @@ def _trainer_device_kwargs(name: str) -> dict[str, Any]:
     if name.startswith("cuda:"):
         return {"accelerator": "gpu", "devices": [int(name.split(":", maxsplit=1)[1])]}
     return {"accelerator": name, "devices": 1}
-
-
-def save_checkpoint(path: Path, model: DeBCR, optimizer: torch.optim.Optimizer, epoch: int, args: argparse.Namespace) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "model_config": model.config.__dict__,
-            "args": vars(args),
-        },
-        path,
-    )
 
 
 class DeBCRDataModule(L.LightningDataModule):
@@ -105,9 +90,10 @@ class DeBCRDataModule(L.LightningDataModule):
 class DeBCRLightningModule(L.LightningModule):
     """Lightning module that owns the DeBCR model, loss, metrics, and optimizer."""
 
-    def __init__(self, model: DeBCR, lr: float, fft_weight: float) -> None:
+    def __init__(self, model_config: dict[str, int], lr: float, fft_weight: float) -> None:
         super().__init__()
-        self.model = model
+        self.save_hyperparameters()
+        self.model = DeBCR(**model_config)
         self.lr = lr
         self.criterion = MIMOMSEFFTLoss(fft_weight=fft_weight)
 
@@ -155,56 +141,11 @@ class DeBCRValidationLightningModule(DeBCRLightningModule):
         return self._shared_step(batch, "val")
 
 
-class LegacyCheckpointCallback(Callback):
-    """Write checkpoints in the existing debcr-train .pt format."""
-
-    def __init__(self, output_dir: str | Path, args: argparse.Namespace, has_val: bool) -> None:
-        super().__init__()
-        self.output_dir = Path(output_dir)
-        self.args = args
-        self.has_val = has_val
-        self.best_val = float("inf")
-
-    def _save(self, trainer: L.Trainer, pl_module: DeBCRLightningModule, name: str) -> None:
-        if not trainer.is_global_zero:
-            return
-        if not trainer.optimizers:
-            raise RuntimeError("Cannot save checkpoint before the optimizer is initialized.")
-        save_checkpoint(
-            self.output_dir / name,
-            pl_module.model,
-            trainer.optimizers[0],
-            trainer.current_epoch + 1,
-            self.args,
-        )
-
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        if not isinstance(pl_module, DeBCRLightningModule):
-            raise TypeError(f"Expected DeBCRLightningModule, got {type(pl_module)!r}")
-        if not self.has_val:
-            self._save(trainer, pl_module, "last.pt")
-
-    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        if trainer.sanity_checking:
-            return
-        if not isinstance(pl_module, DeBCRLightningModule):
-            raise TypeError(f"Expected DeBCRLightningModule, got {type(pl_module)!r}")
-
-        self._save(trainer, pl_module, "last.pt")
-        val_loss = trainer.callback_metrics.get("val_loss")
-        if val_loss is None:
-            return
-        current = float(val_loss.detach().cpu())
-        if current < self.best_val:
-            self.best_val = current
-            self._save(trainer, pl_module, "best.pt")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train PyTorch DeBCR on NPZ low/gt datasets.")
     parser.add_argument("--train", required=True, help="Training NPZ file or directory of NPZ files.")
     parser.add_argument("--val", help="Validation NPZ file or directory of NPZ files.")
-    parser.add_argument("--output-dir", default="checkpoints", help="Directory for last.pt and best.pt.")
+    parser.add_argument("--output-dir", default="checkpoints", help="Directory for Lightning .ckpt files.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -236,20 +177,36 @@ def main(argv: list[str] | None = None) -> None:
     if datamodule.train_data is None:
         raise RuntimeError("Training data was not initialized.")
     sample_low, sample_gt = datamodule.train_data[0]
-    model = DeBCR(
-        in_channels=int(sample_low.shape[0]),
-        out_channels=int(sample_gt.shape[0]),
-        width=args.width,
-        blocks=args.blocks,
-        growth=args.growth,
-        dense_layers=args.dense_layers,
-    )
+    model_config = {
+        "in_channels": int(sample_low.shape[0]),
+        "out_channels": int(sample_gt.shape[0]),
+        "width": args.width,
+        "blocks": args.blocks,
+        "growth": args.growth,
+        "dense_layers": args.dense_layers,
+    }
     lightning_module_cls = DeBCRValidationLightningModule if args.val else DeBCRLightningModule
-    lightning_model = lightning_module_cls(model, lr=args.lr, fft_weight=args.fft_weight)
+    lightning_model = lightning_module_cls(model_config, lr=args.lr, fft_weight=args.fft_weight)
+    checkpoint_callbacks: list[ModelCheckpoint] = [
+        ModelCheckpoint(
+            dirpath=args.output_dir,
+            save_last=True,
+            save_top_k=0,
+        )
+    ]
+    if args.val:
+        checkpoint_callbacks.append(
+            ModelCheckpoint(
+                dirpath=args.output_dir,
+                filename="best",
+                monitor="val_loss",
+                mode="min",
+                save_top_k=1,
+            )
+        )
     trainer = L.Trainer(
         max_epochs=args.epochs,
-        callbacks=[LegacyCheckpointCallback(args.output_dir, args, has_val=args.val is not None)],
-        enable_checkpointing=False,
+        callbacks=checkpoint_callbacks,
         logger=False,
         log_every_n_steps=1,
         num_sanity_val_steps=2 if args.val else 0,

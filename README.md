@@ -49,8 +49,7 @@ and channel is min/max rescaled to `[0, 1]`.
 
 ## Training
 
-Training uses PyTorch Lightning while preserving the same `debcr-train` CLI and
-legacy `.pt` checkpoint format.
+Training uses PyTorch Lightning.
 
 ```bash
 debcr-train \
@@ -61,8 +60,9 @@ debcr-train \
   --batch-size 4
 ```
 
-Checkpoints are written as `last.pt` and, when validation data is provided,
-`best.pt`.
+Checkpoints are written as Lightning `.ckpt` files. `last.ckpt` is always
+written; when validation data is provided, the lowest-`val_loss` checkpoint is
+written as `best.ckpt`.
 
 Useful options:
 
@@ -77,7 +77,7 @@ Run prediction on one `.npz` file or a directory of `.npz` files:
 ```bash
 debcr-predict \
   --input data/2D_denoising/test \
-  --checkpoint checkpoints/2D_denoising/best.pt \
+  --checkpoint checkpoints/2D_denoising/best.ckpt \
   --output-dir results/2D_denoising
 ```
 
@@ -93,11 +93,11 @@ debcr-predict --help
 
 ## ONNX Export
 
-Export trained PyTorch checkpoints for native integration:
+Export trained Lightning checkpoints for native integration:
 
 ```bash
 debcr-export-onnx \
-  --checkpoint checkpoints/2D_denoising/best.pt \
+  --checkpoint checkpoints/2D_denoising/best.ckpt \
   --output debcr.onnx \
   --height 128 \
   --width-px 128

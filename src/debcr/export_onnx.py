@@ -40,19 +40,23 @@ def _device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def load_model(checkpoint_path: str | Path, device: torch.device, fallback_config: dict[str, int]) -> DeBCR:
+def load_model(checkpoint_path: str | Path, device: torch.device) -> DeBCR:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-        config = dict(checkpoint.get("model_config") or {})
-    elif isinstance(checkpoint, dict):
-        state_dict = checkpoint
-        config = {}
-    else:
-        raise ValueError(f"Unsupported checkpoint format: {checkpoint_path}")
+    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
+        raise ValueError(f"Expected a Lightning checkpoint from debcr-train: {checkpoint_path}")
 
-    for key, value in fallback_config.items():
-        config.setdefault(key, value)
+    hyper_parameters = checkpoint.get("hyper_parameters") or {}
+    config = dict(hyper_parameters.get("model_config") or {})
+    if not config:
+        raise ValueError(f"Checkpoint is missing model_config hyperparameters: {checkpoint_path}")
+
+    state_dict = {
+        key.removeprefix("model."): value
+        for key, value in checkpoint["state_dict"].items()
+        if key.startswith("model.")
+    }
+    if not state_dict:
+        raise ValueError(f"Checkpoint has no DeBCR model weights: {checkpoint_path}")
 
     model = DeBCR(**config).to(device)
     model.load_state_dict(state_dict)
@@ -61,18 +65,12 @@ def load_model(checkpoint_path: str | Path, device: torch.device, fallback_confi
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export a PyTorch DeBCR checkpoint to ONNX.")
-    parser.add_argument("--checkpoint", required=True, help="PyTorch checkpoint from debcr-train.")
+    parser = argparse.ArgumentParser(description="Export a Lightning DeBCR checkpoint to ONNX.")
+    parser.add_argument("--checkpoint", required=True, help="Lightning checkpoint from debcr-train.")
     parser.add_argument("--output", required=True, help="Output ONNX path.")
     parser.add_argument("--height", type=int, default=128, help="Example input height for tracing.")
     parser.add_argument("--width-px", type=int, default=128, help="Example input width for tracing.")
     parser.add_argument("--batch-size", type=int, default=1, help="Example batch size for tracing.")
-    parser.add_argument("--channels", type=int, default=1, help="Input channel count.")
-    parser.add_argument("--out-channels", type=int, default=None, help="Output channel count; defaults to --channels.")
-    parser.add_argument("--model-width", type=int, default=32, help="Fallback model width if checkpoint lacks config.")
-    parser.add_argument("--blocks", type=int, default=4, help="Fallback block count if checkpoint lacks config.")
-    parser.add_argument("--growth", type=int, default=16, help="Fallback growth width if checkpoint lacks config.")
-    parser.add_argument("--dense-layers", type=int, default=3, help="Fallback dense-layer count if checkpoint lacks config.")
     parser.add_argument("--device", default="cpu", help="'cpu', 'cuda', 'auto', or another torch device string.")
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--mimo", action="store_true", help="Export z0, z2, and z4 outputs instead of only pred.")
@@ -87,19 +85,17 @@ def main(argv: list[str] | None = None) -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fallback_config = {
-        "in_channels": args.channels,
-        "out_channels": args.out_channels or args.channels,
-        "width": args.model_width,
-        "blocks": args.blocks,
-        "growth": args.growth,
-        "dense_layers": args.dense_layers,
-    }
-    model = load_model(args.checkpoint, device=device, fallback_config=fallback_config)
+    model = load_model(args.checkpoint, device=device)
     wrapper: nn.Module = MIMOWrapper(model) if args.mimo else FullResolutionWrapper(model)
     wrapper.eval()
 
-    example = torch.randn(args.batch_size, args.channels, args.height, args.width_px, device=device)
+    example = torch.randn(
+        args.batch_size,
+        model.config.in_channels,
+        args.height,
+        args.width_px,
+        device=device,
+    )
     output_names = ["z0", "z2", "z4"] if args.mimo else ["pred"]
     dynamic_axes = None
     if not args.fixed_shape:
@@ -124,4 +120,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-
