@@ -1,170 +1,160 @@
 # DeBCR
-### Denoising, deblurring, and optical deconvolution using a physics-informed neural network for light microscopy
 
-**DeBCR** is a physics-informed deep learning model for light microscopy image restorations (deblurring, denoising, and deconvolution).
+Denoising, deblurring, and optical deconvolution using a physics-informed neural
+network for light microscopy.
 
-**DeBCR** is an open-source project and is licensed under [MIT license](LICENSE).
+This branch contains a PyTorch-only DeBCR package. TensorFlow/Keras runtime code,
+vendored CSBDeep code, and TensorFlow checkpoint weights have been removed from
+the package path. Existing TensorFlow checkpoints are not converted; recover them
+from the original `main` branch if needed.
 
- For the installation/usage questions please write to the [Issue Tracker](https://github.com/leeroyhannover/DeBCR/issues).
+## Installation
 
-## Contents
+The project uses `pyproject.toml`, Hatchling, and `uv`. On non-macOS platforms,
+`uv` is configured to resolve `torch` and `torchvision` from the PyTorch CUDA
+`cu130` wheel index.
 
-- [Quick start](#quick-start) - resources to get started with **DeBCR**
-- [About DeBCR](#about-debcr) - key points of the network structure and results examples
-- [Local usage](#local-usage) - instructions on local install, training and prediction
-- [Example datasets](#example-datasets) - publicly deposited example datasets used for DeBCR benchmarks/tutorials
-
-## Quick start
-
-We prepared multiple resources to help you get started with DeBCR (in order of complexity and flexibility):
-1. `CodeOcean capsule` (*link will become available soon*) - a ready-to-run environment with the provided data and trained model to get a first impression of the DeBCR results for various image restoration tasks.
-2. `Google Colab Notebook(s)` - the interactive notebook(s) with accessible GPU resources available online, see the table below (to be extended).
-   | Notebooks                                                                                               | Description |
-   | :------------------------------------------------------------------------------------------------------ | ----------- |
-   | [DeBCR_train](https://githubtocolab.com/leeroyhannover/DeBCR/blob/develop/notebooks/DeBCR_train.ipynb)  | Demostrates DeBCR training data and parameters setup and training process. The example data is available. |
-
-3. `Open-source code` (this GitHub repository) with guidelines on its [Local usage](#local-usage) for training and prediction.
-
-## About DeBCR
-
-**DeBCR** is implemented based on the original Beylkin-Coifman-Rokhlin (BCR) model, implemented within DNN structure:
-![DeBCR network structure](images/DeBCR_structure.jpg)
-
-In contrast to the traditional single-stage residual BCR learning process, DeBCR integrates feature maps from multiple resolution levels:
-![DeBCR multi-resolution](images/DeBCR_multires.jpg)
-
-The example of the **DeBCR** performance on the low/high exposure confocal data (*Tribolium castaneum* from [CARE](https://www.nature.com/articles/s41592-018-0216-7)) is shown below:
-![DeBCR LM](images/DeBCR_LM.jpg)
-
-For more details on implementaion and benchmarks please see our preprint:
-
-Li R., Yushkevich A., Chu X., Kudryashev M., Yakimovich A. Denoising, Deblurring, and optical Deconvolution for cryo-ET and light microscopy with a physics-informed deep neural network DeBCR. *in submission*, 2024.
-
-## Local usage
-
-To use `DeBCR` locally you need to have:
-- a GPU-empowered machine with at least 16GB VRAM;
-- `CUDA`, currently `CUDA-11.5` or `CUDA-11.7` (we are working on DeBCR environments for other CUDA versions);
-- `git` to be able to clone this repository;
-- python package manager for environment, e.g. `(micro)mamba` ([mamba.readthedocs.io](https://mamba.readthedocs.io/)) or `conda-forge` ([conda-forge.org](https://conda-forge.org/)).
-
-Otherwise it is also possible to train **DeBCR** via provided Google Colab Notebook (for a link see [Quick start](#quick-start))
-
-### Local installation
-Installation steps are:
-1. **Download the source code.**
-    * clone repository to desired location via
-    ```bash
-    git clone https://github.com/leeroyhannover/DeBCR.git
-    ```
-    * go to the `DeBCR` folder (needed for further steps)
-    ```bash
-    cd /path/to/DeBCR
-    ```
-2. **Prepare environment with CUDA.**
-    * create and activate package environment
-    ```bash
-    micromamba env create -n debcr-env -c conda-forge python=3.9 pip
-    micromamba activate debcr-env
-    ```
-    * install CUDA dependencies - please use the following setup for CUDA-11.5/7
-    ```bash
-    micromamba install cudatoolkit=11.7 cudnn=8.4
-    pip install -r requirements_cuda11.txt
-    ```
-3. **Install `DeBCR` dependencies.**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-For GPU devices recognition (CUDA-11.5/7 setup above) during local DeBCR usage, please make the following export:
 ```bash
-export LD_LIBRARY_PATH=/path/to/micromamba/envs/debcr-env/lib/python3.9/site-packages/nvidia/cudnn/lib/:${LD_LIBRARY_PATH}
+uv sync
 ```
-with the actual location and name of your `DeBCR` environment. 
 
-We also recommend to check that TensorFlow library, needed for our model, recognizes GPUs:
+For editable development in an existing environment:
+
 ```bash
-python
->>> import tenforflow as tf
->>> tf.config.list_physical_devices('GPU')
-```
-for a single GPU you should see something like:
-```
-[PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')]
+uv pip install -e .
 ```
 
-Howeevr, if the output list is empty, please check that you have:
-* available and visible GPU
-* installed and sourced **CUDA Driver** and **CUDA Tollkit** for `CUDA-11.5/7`
-* installed CUDA dependencies for python (see instructions above)
-* activated correct python package environemnt for `DeBCR` 
-* exported to `LD_LIBRARY_PATH` correct path to cudnn libraries from your `DeBCR` environment (see instructions above)
+## Data Format
 
-### Local training
+Training and prediction use NumPy `.npz` files.
 
-For the local training we provide an example Jupyter Notebook [train_local.ipynb](train_local.ipynb), which is located in the parent directory of the repository. This notebook guides you through the training process using provided examples of already pre-processed data, which are publicly available on Zenodo (for a link see [Example datasets](#example-datasets)). Currently the notebook covers the following example task/dataset:
-- **LM: 2D denoising** (files: LM_2D_CARE_X.npz) - low/high exposure confocal dataset of *Schmidtea mediterranea* (`Denoising_Planaria` dataset) from the publication of CARE network applied to fluorescent microscopy data ([Weigert, Schmidt, Boothe et al., Nature Methods, 2018](https://www.nature.com/articles/s41592-018-0216-7)).
+Training files must contain:
 
-The same data is used to train **DeBCR** in additionally provided Colab Notebook (for a link see [Quick start](#quick-start)). The preprocessing procedures from raw LM microscopy data will become available in the future.
+- `low`: degraded input images
+- `gt`: ground truth images
 
-To get started with the notebook, you need to additionally install [Jupyter Notebook or Jupyter Lab](https://jupyter.org/install) in your `DeBCR` environment, open it and, if needed, switch kearnel to your DeBCR environment `debcr-env`.
-Further please follow the instructions in the [train_local.ipynb](train_local.ipynb) notebook for the training.
+Prediction files must contain:
 
-### Local prediction
+- `low`: degraded input images
 
-For the local prediction (test), you need to activate previously installed `debcr-env` environment in the command line:
+Supported layouts are:
+
+- `H, W`
+- `N, H, W`
+- `N, H, W, C`
+- `N, C, H, W`
+
+Arrays are converted to channel-first PyTorch tensors. By default, every sample
+and channel is min/max rescaled to `[0, 1]`.
+
+## Training
+
 ```bash
-conda activate debcr-env
+debcr-train \
+  --train data/2D_denoising/train \
+  --val data/2D_denoising/val \
+  --output-dir checkpoints/2D_denoising \
+  --epochs 100 \
+  --batch-size 4
 ```
 
-The prediction can be runned on the pre-processed (patched and normalized) data input in NumPy array (.npz) format. The provided data (see [Example datasets](#example-datasets)) is availale to test `DeBCR` on all 4 tasks: 2D and 3D denoising, super-resolution deconvolution from widefield and confocal data.
+Checkpoints are written as `last.pt` and, when validation data is provided,
+`best.pt`.
 
-The data should be currently organized as the following example for LM_2D_CARE dataset used in our tutorials and benchmarks:
-```
-data
-└── 2D_denoising
-    ├── test
-    │   └── LM_2D_CARE_test.npz
-    ├── train
-    │   └── LM_2D_CARE_train.npz
-    └── val
-        └── LM_2D_CARE_val.npz
-```
+Useful options:
 
-The up-to-date usage instructions can be obtained by
 ```bash
-python /path/to/DeBCR/tester_DeBCR.py --help
+debcr-train --help
 ```
 
-and are provided as well below:
+## Prediction
+
+Run prediction on one `.npz` file or a directory of `.npz` files:
+
 ```bash
-usage: tester_DeBCR.py [-h] [--task_type {2D_denoising,3D_denoising,bright_SR,confocal_SR}] [--weights_path WEIGHTS_PATH] [--ckpt_name CKPT_NAME] [--testset_path TESTSET_PATH]
-                       [--save_fig] [--fig_path FIG_PATH] [--results_path RESULTS_PATH] [--whole_predict] [--gpu_id GPU_ID]
-
-DeBCR: DL-based denoising, deconvolution and deblurring for light microscopy data.
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --task_type {2D_denoising,3D_denoising,bright_SR,confocal_SR}
-                        Task type to perform according to data nature. (default: 2D_denoising)
-  --weights_path WEIGHTS_PATH
-                        Path to the folder containing weights (checkpoints) of the trained DeBCR model. (default: ./weights/TASK_TYPE/)
-  --ckpt_name CKPT_NAME
-                        Filename (w/o file extension) of the checkpoint of choice (can be a wildcard as well).
-                        If not provided, the latest (by sorted filename) checkpoint file will be used. (default: ckpt-*)
-  --testset_path TESTSET_PATH
-                        Path to the test datset as a single NPZ file. (default: None)
-  --save_fig            Flag to enable saving figures of the example test results. (default: False)
-  --fig_path FIG_PATH   Path to save figures of the example test results. (default: ./figures/)
-  --results_path RESULTS_PATH
-                        Path to save the test results. (default: ./results/)
-  --whole_predict       Flag to enable predicting the whole image for certain tasks. (default: False)
-  --gpu_id GPU_ID       GPU ID to be used. (default: 0)
+debcr-predict \
+  --input data/2D_denoising/test \
+  --checkpoint checkpoints/2D_denoising/best.pt \
+  --output-dir results/2D_denoising
 ```
 
-## Example datasets
+Outputs are written as `results*.npz` files containing:
 
-To evaluate **DeBCR** on various image restoration tasks, several previously published datasets were assembled, pre-processed and publicly deposited as NumPy (.npz) arrays in three essential sets (train, validation and test). The datasets aim at multiple image restoration tasks such as denoising and super-resolution deconvolution.
+- `pred`: restored full-resolution prediction
 
-Access data and its details on Zenodo: [10.5281/zenodo.12626121](https://zenodo.org/doi/10.5281/zenodo.12626121).
+Useful options:
+
+```bash
+debcr-predict --help
+```
+
+## ONNX Export
+
+Export trained PyTorch checkpoints for native integration:
+
+```bash
+debcr-export-onnx \
+  --checkpoint checkpoints/2D_denoising/best.pt \
+  --output debcr.onnx \
+  --height 128 \
+  --width-px 128
+```
+
+The default ONNX graph has:
+
+- input `x0`: `float32` tensor shaped `N, C, H, W`
+- output `pred`: full-resolution `float32` tensor shaped `N, C, H, W`
+
+Batch, height, and width are dynamic by default. Use `--fixed-shape` for a
+static graph. Use `--mimo` to export all three model outputs as `z0`, `z2`, and
+`z4`.
+
+ONNX export requires the optional dependencies:
+
+```bash
+uv sync --extra onnx
+```
+
+## Native Integration
+
+Two minimal ONNX inference paths are included:
+
+- [debcr-cpp](debcr-cpp/README.md): C++17 + ONNX Runtime
+- [debcr-rs](debcr-rs/README.md): Rust + `ort`
+
+Both examples read raw `float32` NCHW input, run `x0 -> pred`, and write raw
+`float32` output. They are intentionally small so application code can replace
+the raw-file I/O with microscopy image loading while keeping the ONNX session
+setup.
+
+## Python API
+
+```python
+import torch
+from debcr import DeBCR
+from debcr.losses import MIMOMSEFFTLoss
+
+model = DeBCR()
+x0 = torch.rand(2, 1, 128, 128)
+
+# Convenience path: half and quarter scales are derived internally.
+z0, z2, z4 = model(x0)
+
+# Explicit path.
+x2 = torch.nn.functional.avg_pool2d(x0, kernel_size=2, stride=2)
+x4 = torch.nn.functional.avg_pool2d(x0, kernel_size=4, stride=4)
+z0, z2, z4 = model(x0, x2, x4)
+
+criterion = MIMOMSEFFTLoss()
+loss = criterion([z0, z2, z4], [x0, x2, x4])
+loss.backward()
+```
+
+## Citation
+
+If you use this software, please cite the project metadata in
+[CITATION.cff](CITATION.CFF).
+
+## License
+
+DeBCR is licensed under the [MIT license](LICENSE).

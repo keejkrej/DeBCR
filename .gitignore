@@ -2,16 +2,24 @@
 # *.ipynb
 .ipynb_checkpoints
 
-# weights
-# *ckpt*
-# *checkpoint*
-# *.h5
-# *.hdf5
-checkpoint/
+# environments and build artifacts
+.venv/
+build/
+dist/
+*.egg-info/
+debcr-rs/target/
 
 ./data/*
 
 *.npz
 
+# training outputs
+checkpoint/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.py[cod]

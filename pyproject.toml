@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "debcr"
+version = "0.1.0"
+description = "PyTorch implementation of DeBCR for microscopy image restoration"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Rui Li" },
+  { name = "Artsemi Yushkevich" },
+  { name = "Xiaofeng Chu" },
+  { name = "Mikhail Kudryashev" },
+  { name = "Artur Yakimovich" },
+]
+dependencies = [
+  "numpy>=1.24",
+  "scikit-image>=0.21",
+  "torch>=2.7",
+  "torchvision>=0.22",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+onnx = [
+  "onnx>=1.16",
+  "onnxruntime>=1.18",
+]
+
+[project.urls]
+Homepage = "https://github.com/leeroyhannover/DeBCR"
+Issues = "https://github.com/leeroyhannover/DeBCR/issues"
+
+[project.scripts]
+debcr = "debcr.cli:main"
+debcr-train = "debcr.cli:main_train"
+debcr-predict = "debcr.cli:main_predict"
+debcr-export-onnx = "debcr.cli:main_export_onnx"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/debcr"]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch", marker = "sys_platform != 'darwin'" }]
+torchvision = [{ index = "pytorch", marker = "sys_platform != 'darwin'" }]
