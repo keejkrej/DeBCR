@@ -49,6 +49,9 @@ and channel is min/max rescaled to `[0, 1]`.
 
 ## Training
 
+Training uses PyTorch Lightning while preserving the same `debcr-train` CLI and
+legacy `.pt` checkpoint format.
+
 ```bash
 debcr-train \
   --train data/2D_denoising/train \

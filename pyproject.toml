@@ -17,11 +17,11 @@ authors = [
   { name = "Artur Yakimovich" },
 ]
 dependencies = [
+  "lightning>=2.3",
   "numpy>=1.24",
   "scikit-image>=0.21",
   "torch>=2.7",
   "torchvision>=0.22",
-  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]

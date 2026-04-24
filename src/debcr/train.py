@@ -1,24 +1,40 @@
-"""Training entrypoint for PyTorch DeBCR."""
+"""Training entrypoint for PyTorch Lightning DeBCR."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
+import lightning.pytorch as L
 import torch
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from lightning.pytorch.callbacks import Callback
 
 from .data import NPZImageDataset, make_mimo_scales
 from .losses import MIMOMSEFFTLoss
 from .metrics import psnr
 from .models import DeBCR
 
+ImageLoader = DataLoader[tuple[torch.Tensor, torch.Tensor]]
+
 
 def _device(name: str) -> torch.device:
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(name)
+
+
+def _trainer_device_kwargs(name: str) -> dict[str, Any]:
+    if name == "auto":
+        return {"accelerator": "auto", "devices": "auto"}
+    if name == "cpu":
+        return {"accelerator": "cpu", "devices": 1}
+    if name == "cuda":
+        return {"accelerator": "gpu", "devices": 1}
+    if name.startswith("cuda:"):
+        return {"accelerator": "gpu", "devices": [int(name.split(":", maxsplit=1)[1])]}
+    return {"accelerator": name, "devices": 1}
 
 
 def save_checkpoint(path: Path, model: DeBCR, optimizer: torch.optim.Optimizer, epoch: int, args: argparse.Namespace) -> None:
@@ -35,38 +51,153 @@ def save_checkpoint(path: Path, model: DeBCR, optimizer: torch.optim.Optimizer, 
     )
 
 
-def run_epoch(
-    model: DeBCR,
-    loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
-    criterion: MIMOMSEFFTLoss,
-    device: torch.device,
-    optimizer: torch.optim.Optimizer | None = None,
-) -> tuple[float, float]:
-    train = optimizer is not None
-    model.train(train)
-    total_loss = 0.0
-    total_psnr = 0.0
-    total_items = 0
+class DeBCRDataModule(L.LightningDataModule):
+    """Lightning data module for NPZ low/gt training datasets."""
 
-    for low, gt in tqdm(loader, leave=False):
-        low = low.to(device, non_blocking=True)
-        gt = gt.to(device, non_blocking=True)
+    def __init__(
+        self,
+        train_path: str,
+        val_path: str | None,
+        batch_size: int,
+        num_workers: int,
+        rescale: bool,
+        pin_memory: bool,
+    ) -> None:
+        super().__init__()
+        self.train_path = train_path
+        self.val_path = val_path
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.rescale = rescale
+        self.pin_memory = pin_memory
+        self.train_data: NPZImageDataset | None = None
+        self.val_data: NPZImageDataset | None = None
+
+    def setup(self, stage: str | None = None) -> None:
+        if stage in (None, "fit") and self.train_data is None:
+            self.train_data = NPZImageDataset(self.train_path, rescale=self.rescale)
+        if stage in (None, "fit", "validate") and self.val_path and self.val_data is None:
+            self.val_data = NPZImageDataset(self.val_path, rescale=self.rescale)
+
+    def train_dataloader(self) -> ImageLoader:
+        if self.train_data is None:
+            raise RuntimeError("DeBCRDataModule.setup('fit') must run before train_dataloader().")
+        return DataLoader(
+            self.train_data,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+
+    def val_dataloader(self) -> ImageLoader | list[ImageLoader]:
+        if self.val_data is None:
+            return []
+        return DataLoader(
+            self.val_data,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+
+
+class DeBCRLightningModule(L.LightningModule):
+    """Lightning module that owns the DeBCR model, loss, metrics, and optimizer."""
+
+    def __init__(self, model: DeBCR, lr: float, fft_weight: float) -> None:
+        super().__init__()
+        self.model = model
+        self.lr = lr
+        self.criterion = MIMOMSEFFTLoss(fft_weight=fft_weight)
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return self.model(x)
+
+    def _shared_step(self, batch: tuple[torch.Tensor, torch.Tensor], stage: str) -> torch.Tensor:
+        low, gt = batch
         targets = make_mimo_scales(gt)
+        preds = self.model(low)
+        loss = self.criterion(preds, targets)
+        batch_size = int(low.shape[0])
 
-        if train:
-            optimizer.zero_grad(set_to_none=True)
-        preds = model(low)
-        loss = criterion(preds, targets)
-        if train:
-            loss.backward()
-            optimizer.step()
+        self.log(
+            f"{stage}_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            f"{stage}_psnr",
+            psnr(preds[0].detach(), gt),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
+        return loss
 
-        batch = int(low.shape[0])
-        total_loss += float(loss.detach().cpu()) * batch
-        total_psnr += float(psnr(preds[0].detach(), gt).detach().cpu()) * batch
-        total_items += batch
+    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        del batch_idx
+        return self._shared_step(batch, "train")
 
-    return total_loss / max(total_items, 1), total_psnr / max(total_items, 1)
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+
+
+class DeBCRValidationLightningModule(DeBCRLightningModule):
+    """DeBCR Lightning module with validation enabled."""
+
+    def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        del batch_idx
+        return self._shared_step(batch, "val")
+
+
+class LegacyCheckpointCallback(Callback):
+    """Write checkpoints in the existing debcr-train .pt format."""
+
+    def __init__(self, output_dir: str | Path, args: argparse.Namespace, has_val: bool) -> None:
+        super().__init__()
+        self.output_dir = Path(output_dir)
+        self.args = args
+        self.has_val = has_val
+        self.best_val = float("inf")
+
+    def _save(self, trainer: L.Trainer, pl_module: DeBCRLightningModule, name: str) -> None:
+        if not trainer.is_global_zero:
+            return
+        if not trainer.optimizers:
+            raise RuntimeError("Cannot save checkpoint before the optimizer is initialized.")
+        save_checkpoint(
+            self.output_dir / name,
+            pl_module.model,
+            trainer.optimizers[0],
+            trainer.current_epoch + 1,
+            self.args,
+        )
+
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if not isinstance(pl_module, DeBCRLightningModule):
+            raise TypeError(f"Expected DeBCRLightningModule, got {type(pl_module)!r}")
+        if not self.has_val:
+            self._save(trainer, pl_module, "last.pt")
+
+    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if trainer.sanity_checking:
+            return
+        if not isinstance(pl_module, DeBCRLightningModule):
+            raise TypeError(f"Expected DeBCRLightningModule, got {type(pl_module)!r}")
+
+        self._save(trainer, pl_module, "last.pt")
+        val_loss = trainer.callback_metrics.get("val_loss")
+        if val_loss is None:
+            return
+        current = float(val_loss.detach().cpu())
+        if current < self.best_val:
+            self.best_val = current
+            self._save(trainer, pl_module, "best.pt")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,8 +224,18 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     device = _device(args.device)
 
-    train_data = NPZImageDataset(args.train, rescale=not args.no_rescale)
-    sample_low, sample_gt = train_data[0]
+    datamodule = DeBCRDataModule(
+        train_path=args.train,
+        val_path=args.val,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        rescale=not args.no_rescale,
+        pin_memory=device.type == "cuda",
+    )
+    datamodule.setup("fit")
+    if datamodule.train_data is None:
+        raise RuntimeError("Training data was not initialized.")
+    sample_low, sample_gt = datamodule.train_data[0]
     model = DeBCR(
         in_channels=int(sample_low.shape[0]),
         out_channels=int(sample_gt.shape[0]),
@@ -102,44 +243,23 @@ def main(argv: list[str] | None = None) -> None:
         blocks=args.blocks,
         growth=args.growth,
         dense_layers=args.dense_layers,
-    ).to(device)
-
-    train_loader = DataLoader(
-        train_data,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
     )
-    val_loader = None
+    lightning_module_cls = DeBCRValidationLightningModule if args.val else DeBCRLightningModule
+    lightning_model = lightning_module_cls(model, lr=args.lr, fft_weight=args.fft_weight)
+    trainer = L.Trainer(
+        max_epochs=args.epochs,
+        callbacks=[LegacyCheckpointCallback(args.output_dir, args, has_val=args.val is not None)],
+        enable_checkpointing=False,
+        logger=False,
+        log_every_n_steps=1,
+        num_sanity_val_steps=2 if args.val else 0,
+        **_trainer_device_kwargs(args.device),
+    )
     if args.val:
-        val_loader = DataLoader(
-            NPZImageDataset(args.val, rescale=not args.no_rescale),
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=device.type == "cuda",
-        )
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = MIMOMSEFFTLoss(fft_weight=args.fft_weight)
-    output_dir = Path(args.output_dir)
-    best_val = float("inf")
-
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_psnr = run_epoch(model, train_loader, criterion, device, optimizer)
-        line = f"epoch {epoch:04d} train_loss={train_loss:.6f} train_psnr={train_psnr:.3f}"
-        if val_loader is not None:
-            with torch.no_grad():
-                val_loss, val_psnr = run_epoch(model, val_loader, criterion, device)
-            line += f" val_loss={val_loss:.6f} val_psnr={val_psnr:.3f}"
-            if val_loss < best_val:
-                best_val = val_loss
-                save_checkpoint(output_dir / "best.pt", model, optimizer, epoch, args)
-        print(line)
-        save_checkpoint(output_dir / "last.pt", model, optimizer, epoch, args)
+        trainer.fit(lightning_model, datamodule=datamodule)
+    else:
+        trainer.fit(lightning_model, train_dataloaders=datamodule.train_dataloader())
 
 
 if __name__ == "__main__":
     main()
-
