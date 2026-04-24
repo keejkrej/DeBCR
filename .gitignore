@@ -16,6 +16,7 @@ debcr-rs/target/
 # training outputs
 checkpoint/
 checkpoints/
+results/
 *.pt
 *.pth
 *.onnx
